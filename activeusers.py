@@ -1,7 +1,7 @@
 """Codefresh Active Users via CLI.
 
 Usage:
-    active_users.py --key=<codefresh_api_key> [--url=<base_api_url>] [--threshold=<days>] [--batch=<batch_size>] [--limit=<batch_limit>] [--interval=<stdout_update_interval>]
+    active_users.py --key=<codefresh_api_key> [--url=<base_api_url>] [--days=<threshold_days>] [--months=<threshold_months>] [--exactminute] [--batch=<batch_size>] [--limit=<batch_limit>] [--interval=<stdout_update_interval>]
     active_users.py (-g | --help)
     active_users.py --version
 
@@ -10,10 +10,11 @@ Options:
     --version           Show version
     --api_key           Codefresh API key to use
     --base_api_url      API base url (default is https://g.codefresh.io/api)
-    --threshold_days    Time peroid that an account should have logged in during to count as active (default is 90)
-    --batch_size        How many results should an API call return for processing each time? (default is 100)
+    --threshold_days    Time peroid that an account should have logged in during to count as active (default is 0)
+    --threshold_months  Time peroid (in months) that account should have logged in to count as active - any value here is added to threshold_days (default is 3)
+    --batch_size        How many results should an API call return for processing each time? (default is 1000)
     --batch_limt        How many batches should we process (only used to limit calls for testing)
-
+    --exactminute       If set, the current hour and minute will be used (for exactly x days), otherwise 'from midnight' is used.
 """
 
 import yaml
@@ -21,29 +22,36 @@ from docopt import docopt
 import requests
 from pprint import pprint
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 DB_LAST_LOGIN_FORMAT='%Y-%m-%dT%H:%M:%S.%fZ'
 
 class ActiveUserCounter():
-    def __init__(self, arguments):
+    def __init__(self, arg):
         self.user_records = {}
-        self.api_key=arguments['--key']
+        self.api_key=arg['--key']
         assert( self.api_key is not None)
-        self.api_url=arguements['--url']
+        self.api_url=arg['--url']
         if self.api_url is None:
             self.api_url = 'https://g.codefresh.io/api'
         if self.api_url[-1] != '/':
             self.api_url=self.api_url + '/'
-        self.batch_size=arguements['--batch']
+        self.batch_size=arg['--batch']
         if self.batch_size is None:
-            self.batch_size = 100
-        self.batch_limit=arguements['--limit']
+            self.batch_size = 1000
+        self.batch_limit=arg['--limit']
         if self.batch_limit is not None:
             self.batch_limit = int(self.batch_limit)
-        self.active_threshold=arguements['--threshold']
-        if self.active_threshold is None:
-            self.active_threshold = 90
+        self.active_days=arg['--days']
+        if self.active_days is None:
+            self.active_days = 0
+        self.active_months=arg['--months']
+        if self.active_months is None:
+            self.active_months = 3
+        self.exact_min = arg['--exactminute']
         self.last_log_output = datetime.now()
+
+
     def _api_call(self, api, page ):
         """ Internal function to format API calls and render to json """
         url = '{}{}?limit={}&page={}'.format( self.api_url, api, self.batch_size, page)
@@ -53,8 +61,10 @@ class ActiveUserCounter():
         except:
             print(r)
 
-    def _discover_users(self):
-        # first request will also return the total number of records we are dealing with, which will update the below
+
+    def _fetch_users(self):
+        """ first request will also return the total number of records we are dealing with,
+            which is then used to configure how many times we need to loop"""
         total_pages = 10
         current_page = 1
         fields_to_save = ['_id', 'name', 'createdAt', 'updatedAt', 'last_login_date']
@@ -70,29 +80,55 @@ class ActiveUserCounter():
                 if '_id' in record:
                     self.user_records[record['_id']] = { x: record[x] for x in fields_to_save if x in record.keys()}
             print( "{}/{} accounts discovered".format(len(self.user_records), api_return['total']))
+        return self.user_records
 
+
+    def _save_users(self, filename="./users.yml"):
+        """ save the fetched users to a file (used for testing or interactive analysis)"""
+        with open( filename, 'w') as save_as:
+            yaml.dump( self.user_records, save_as ) 
+
+
+    def _load_users(self, filename="./users.yml"):
+        """ load the previously fetched users from a file (used for testing or interactive analysis)"""
+        with open( filename, 'r') as load_from:
+            self.user_records = yaml.load( load_from )
+            return self.user_records
+            
 
     def _count_active_users(self):
-        """Using the records of the last_login (if present) compared to the threshold, we determine how many users are currently active"""
+        """Using the records of the last_login (if present),
+           we then work out the date they need to have logged in after (active_months + active_days)
+           The matching users are saved in self.active_user_list
+           We also track how many users we encounter that have never logged in (field is blank), and
+           save that as self.timeless_users
+        """
         current_time = datetime.now()
-        active_threshold_seconds = self.active_threshold * 24 * 60 * 60
+        target_time = current_time - relativedelta(months = self.active_months, days = self.active_days )
+        if self.exact_min:
+            # measure from midnight..
+            target_time.replace(hour = 0, minute = 0)
+        # set up our record keeping
         self.active_user_list = {}
         self.timeless_users = 0
+        # loop over each record
         for uuid, record in self.user_records.items():
             if 'last_login_date' in record:
                 last_login = datetime.strptime( record['last_login_date'], DB_LAST_LOGIN_FORMAT )
-                if (current_time - last_login).total_seconds() < active_threshold_seconds:
+                #if (current_time - last_login).total_seconds() < active_threshold_in_seconds:
+                if last_login > target_time:
                     self.active_user_list[uuid] = record
             else: 
                 self.timeless_users += 1
-                
+
+
     def start(self):
         """ Primary loop. 
             Fetches batch_size from the account API, up to batch_limit times (if set)
             Extracts the user records from the accounts.
             Loops over the user accounts to check last login and determine 'active users'
         """
-        self._discover_users()
+        self._fetch_users()
         self._count_active_users()
 
 
