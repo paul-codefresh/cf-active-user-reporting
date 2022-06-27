@@ -13,7 +13,7 @@ Options:
     --threshold_days    Time peroid that an account should have logged in during to count as active (default is 0)
     --threshold_months  Time peroid (in months) that account should have logged in to count as active - any value here is added to threshold_days (default is 3)
     --batch_size        How many results should an API call return for processing each time? (default is 1000)
-    --batch_limt        How many batches should we process (only used to limit calls for testing)
+    --batch_limit       How many batches should we process (only used to limit calls for testing)
     --exactminute       If set, the current hour and minute will be used (for exactly x days), otherwise 'from midnight' is used.
 """
 
@@ -122,6 +122,25 @@ class ActiveUserCounter():
                 self.timeless_users += 1
 
 
+    def get_human_threshold(self):
+        """ Using the active_months and active_days, this returns a human friendly string representation
+            of exactly how far back we are looking
+        """
+        days = None
+        months = None
+        if self.active_months is not None and self.active_months > 0:
+            months = "1 month" if self.active_months == 1 else "{} months".format( self.active_months )
+        if self.active_days is not None and self.active_days > 0:
+            days = "1 day" if self.active_days == 1 else "{} days".format( self.active_days )
+        if days == None:
+            return months
+        if months == None:
+            return days
+        if days == None and months == None:
+            return "[not set]"
+        return "{} and {}".format( months, days )
+
+
     def start(self):
         """ Primary loop. 
             Fetches batch_size from the account API, up to batch_limit times (if set)
@@ -136,7 +155,7 @@ if __name__=="__main__":
     arguements=docopt(__doc__, version="Codefresh Active Users via CLI 0.1.0")
     counter = ActiveUserCounter( arguements )
     counter.start()
-    print('Threshold for active users is anyone who has logged in the in the {} days'.format(counter.active_threshold))
+    print('Threshold for active users is anyone who has logged in the in the {}'.format(counter.get_human_threshold()))
     print('{} users had invalid or no data for the last login date'.format(counter.timeless_users))
     print('{} active users found'.format(len(counter.active_user_list)))
     
